@@ -209,7 +209,7 @@ def main(_):
 
 
             # Train 
-            if (agent.memory.count > training_start): #& ((step) % batch_size == 0): ,_ for some reason this causes divergence
+            if (agent.memory.count >= training_start): #& ((step) % batch_size == 0): ,_ for some reason this causes divergence
                 # Get transition sample from memory
                 s_t0, a_t0, r_t1, s_t1, t_t1 = agent.memory.sample()
                 # Run optimization op (backprop)
@@ -268,9 +268,9 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='CartPole-v0',
                        help='Name of Gym environment')
 
-    parser.add_argument('--training_iters', type=int, default=50000,
+    parser.add_argument('--training_iters', type=int, default=500000,
                        help='Number of training iterations to run for')
-    parser.add_argument('--display_step', type=int, default=5000,
+    parser.add_argument('--display_step', type=int, default=10000,
                        help='Number of iterations between parameter prints')
 
     parser.add_argument('--memory_size', type=int, default=1000,
@@ -278,7 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=10,
                        help='Size of batch for Q-value updates')
 
-    parser.add_argument('--discount', type=float, default=0.97,
+    parser.add_argument('--discount', type=float, default=0.9,
                        help='Discount factor')
     parser.add_argument('--epsilon', type=float, default=0.1,
                        help='Initial epsilon')
@@ -292,7 +292,7 @@ if __name__ == '__main__':
     parser.add_argument('--reg', type=float, default=1,
                        help='Regularization parameter for network')
 
-    parser.add_argument('--layer_sizes', type=str, default='',
+    parser.add_argument('--layer_sizes', type=str, default='20',
                        help='Hidden layer sizes for network, separate with comma')
 
     parser.add_argument('--chk_dir', type=str, default=None,
