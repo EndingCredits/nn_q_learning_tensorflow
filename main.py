@@ -6,10 +6,8 @@ import time
 from tqdm import tqdm
 
 import gym
-import gym_vgdl
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.ops import rnn, rnn_cell
 
 
 class Agent():
@@ -20,6 +18,7 @@ class Agent():
         self.discount = args.discount      # Discount factor
         self.epsilon = 0.25                # Epsilon
         self.learning_rate = args.learning_rate
+        self.regularization = args.reg
 
 	self.layer_sizes = [self.n_input] + args.layer_sizes + [self.n_actions]
 
@@ -29,7 +28,7 @@ class Agent():
 
         # Tensorflow variables
         self.state = tf.placeholder("float", [None, self.n_input])
-        self.pred_q = self.network(self.state, self.layer_sizes)
+        self.pred_q, self.reg = self.network(self.state, self.layer_sizes)
         self.pred_action = tf.argmax(self.pred_q, dimension=1)
         self.target_q = tf.placeholder("float", [None])
 
@@ -38,7 +37,7 @@ class Agent():
         q_acted = tf.reduce_sum(self.pred_q * action_one_hot, reduction_indices=1)
 
         delta = self.target_q - q_acted
-        loss = tf.reduce_mean(tf.square(delta))
+        loss = tf.reduce_mean(tf.square(delta)) + self.reg
         self.optim = tf.train.AdamOptimizer(self.learning_rate).minimize(loss)
 
         self.step = tf.Variable(0, name='global_step', trainable=False)
@@ -66,18 +65,19 @@ class Agent():
         # Create params
         for i in range(hidden_dim):
             weights[i] = tf.Variable(tf.random_normal((d[i],d[i+1])), name='weights'+str(i+1))
-            biases[i] = tf.Variable(tf.zeros(d[i+1], name='biases'+str(i+1)))
+            biases[i] = tf.Variable(tf.zeros(d[i+1]), name='biases'+str(i+1))
         
         # Build graph
         fc = state
-        for i in range(hidden_dim-1):
-            temp = tf.tanh(tf.matmul(fc, weights[i])) 
-            fc = tf.nn.bias_add(temp, biases[i])
+        for i in range(hidden_dim - 1):
+            fc = tf.tanh(tf.matmul(fc, weights[i]) + biases[i]) 
     
-        Qs = tf.nn.bias_add(tf.matmul(fc, weights[-1]), biases[-1])
+        Qs = tf.matmul(fc, weights[-1]) + biases[-1]
+
+        reg = self.regularization * tf.reduce_mean([tf.reduce_mean(tf.square(w)) for w in weights])# + [tf.reduce_mean(tf.square(b)) for b in biases])
 
         # Returns the output Q-values
-        return Qs
+        return Qs, reg
 
 # Adapted from github.com/devsisters/DQN-tensorflow/
 class ReplayMemory:
@@ -268,27 +268,29 @@ if __name__ == '__main__':
     parser.add_argument('--env', type=str, default='CartPole-v0',
                        help='Name of Gym environment')
 
-    parser.add_argument('--training_iters', type=int, default=500000,
+    parser.add_argument('--training_iters', type=int, default=50000,
                        help='Number of training iterations to run for')
-    parser.add_argument('--display_step', type=int, default=50000,
+    parser.add_argument('--display_step', type=int, default=5000,
                        help='Number of iterations between parameter prints')
 
     parser.add_argument('--memory_size', type=int, default=1000,
                        help='Time to start training from')
-    parser.add_argument('--batch_size', type=int, default=1,
+    parser.add_argument('--batch_size', type=int, default=10,
                        help='Size of batch for Q-value updates')
 
     parser.add_argument('--discount', type=float, default=0.97,
                        help='Discount factor')
-    parser.add_argument('--epsilon', type=float, default=0.25,
+    parser.add_argument('--epsilon', type=float, default=0.1,
                        help='Initial epsilon')
     parser.add_argument('--epsilon_final', type=float, default=None,
                        help='Final epsilon')
     parser.add_argument('--epsilon_anneal', type=int, default=None,
                        help='Epsilon anneal steps')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
 
-    parser.add_argument('--learning_rate', type=float, default=0.0025,
                        help='Learning rate for TD updates')
+    parser.add_argument('--reg', type=float, default=1,
+                       help='Regularization parameter for network')
 
     parser.add_argument('--layer_sizes', type=str, default='',
                        help='Hidden layer sizes for network, separate with comma')
@@ -309,7 +311,7 @@ if __name__ == '__main__':
     if args.epsilon_final == None: args.epsilon_final = args.epsilon
     if args.epsilon_anneal == None: args.epsilon_anneal = args.training_iters
 
-    args.layer_sizes = [lambda: [int(i) for i in args.layer_sizes.split(',')], lambda: []][args.layer_sizes == '']() #Best expression ever?
+    args.layer_sizes = [int(i) for i in (args.layer_sizes.split(',') if args.layer_sizes else [])]
 
     print args
 
