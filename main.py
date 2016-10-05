@@ -19,6 +19,7 @@ class Agent():
         self.epsilon = 0.25                # Epsilon
         self.learning_rate = args.learning_rate
         self.regularization = args.reg
+        self.use_target = args.use_target
 
 	self.layer_sizes = [self.n_input] + args.layer_sizes + [self.n_actions]
 
@@ -28,13 +29,18 @@ class Agent():
 
         # Tensorflow variables
         self.state = tf.placeholder("float", [None, self.n_input])
-        self.pred_q, self.reg = self.network(self.state, self.layer_sizes)
-        self.pred_action = tf.argmax(self.pred_q, dimension=1)
-        self.target_q = tf.placeholder("float", [None])
+        with tf.variable_scope('prediction'):
+            self.pred_q, self.reg, self.pred_weights = self.network(self.state, self.layer_sizes)
+        with tf.variable_scope('target'):
+            self.target_pred_q, _, self.target_weights = self.network(self.state, self.layer_sizes)
+        
+        #self.pred_action = tf.argmax(self.pred_q, dimension=1)
 
         self.action = tf.placeholder('int64', [None])
         action_one_hot = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
         q_acted = tf.reduce_sum(self.pred_q * action_one_hot, reduction_indices=1)
+
+        self.target_q = tf.placeholder("float", [None])
 
         delta = self.target_q - q_acted
         loss = tf.reduce_mean(tf.square(delta)) + self.reg
@@ -43,14 +49,16 @@ class Agent():
         self.step = tf.Variable(0, name='global_step', trainable=False)
 
     def predict(self, state):
+        q = self.session.run(self.pred_q, feed_dict={self.state: [state]})
+
+        action = np.argmax(q, axis=1)[0]; q = np.max(q, axis=1)[0]
         if np.random.rand() < self.epsilon:
             action = np.random.randint(0, self.n_actions)
-        else:
-            action = self.pred_action.eval({self.state: [state]})[0]
-        return action
+
+        return action, q
 
     def tdUpdate(self, s_t0, a_t0, r_t0, s_t1, t_t1):
-        q_t1 = self.pred_q.eval({self.state: s_t1})
+        q_t1 = self.target_pred_q.eval({self.state: s_t1}) if self.use_target else self.pred_q.eval({self.state: s_t1})
         V_t1 = np.max(q_t1, axis=1)
         V_t1 = np.multiply(np.ones(shape=np.shape(t_t1)) - t_t1, V_t1)
         target_q_t = self.discount * V_t1 + r_t0
@@ -77,7 +85,7 @@ class Agent():
         reg = self.regularization * tf.reduce_mean([tf.reduce_mean(tf.square(w)) for w in weights])# + [tf.reduce_mean(tf.square(b)) for b in biases])
 
         # Returns the output Q-values
-        return Qs, reg
+        return Qs, reg, weights + biases
 
 # Adapted from github.com/devsisters/DQN-tensorflow/
 class ReplayMemory:
@@ -167,7 +175,7 @@ def main(_):
         rewards = []
         ep_r = 0
         r = 0
-
+        q = 0
 
         if args.play_from is None:
           # Training, act and learn
@@ -194,13 +202,14 @@ def main(_):
             agent.epsilon = epsilon
 
             # Act, and add 
-            act = agent.predict(state)
+            act, q_ = agent.predict(state)
             state, reward, terminal, _ = env.step(act)
             agent.memory.add(act, reward, state, terminal)
 
             # keep track of total reward
             r += reward
             ep_r += reward
+            q += q_
 
             if terminal:
                 #Reset environment and add episode reward to list
@@ -215,16 +224,20 @@ def main(_):
                 # Run optimization op (backprop)
                 agent.tdUpdate(s_t0, a_t0, r_t1, s_t1, t_t1)
 
+            if step % args.target_step == 0 & args.use_target:
+                ops = [ agent.target_weights[i].assign(agent.pred_weights[i]) for i in range(len(agent.target_weights))]
+                sess.run(ops)
+
 
             # Display Statistics
             if (step) % display_step == 0:
-                 r = r/display_step # get average reward
+                 r = r/display_step; q = q/display_step # get average reward
                  if rewards != []:
                      max_ep_r = np.amax(rewards); avr_ep_r = np.mean(rewards)
                  else:
                      max_ep_r = avr_ep_r = 0
-                 tqdm.write("{}, {:>7}/{}it | avg_r: {:4.3f}, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}, num_eps: {}, epsilon: {:4.3f}".format(time.strftime("%H:%M:%S"), step, \
-                            training_iters, r, avr_ep_r, max_ep_r, len(rewards), epsilon))
+                 tqdm.write("{}, {:>7}/{}it | avg_r: {:4.3f}, avg_q: {:4.3f}, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}, num_eps: {}, epsilon: {:4.3f}".format(time.strftime("%H:%M:%S"), step, \
+                            training_iters, r, q, avr_ep_r, max_ep_r, len(rewards), epsilon))
                  r=0; max_ep_r = 0;
                  rewards = []
 
@@ -249,7 +262,7 @@ def main(_):
           agent.epsilon = args.epsilon_final
 
           while True:
-            act = agent.predict(state)
+            act, _ = agent.predict(state)
             state, reward, terminal, _ = env.step(act)
 
             ep_r += reward
@@ -278,6 +291,11 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=10,
                        help='Size of batch for Q-value updates')
 
+    parser.add_argument('--use_target', type=bool, default=True,
+                       help='Use separate target network')
+    parser.add_argument('--target_step', type=int, default=1000,
+                       help='Steps between updates of the taget network')
+
     parser.add_argument('--discount', type=float, default=0.9,
                        help='Discount factor')
     parser.add_argument('--epsilon', type=float, default=0.1,
@@ -287,9 +305,8 @@ if __name__ == '__main__':
     parser.add_argument('--epsilon_anneal', type=int, default=None,
                        help='Epsilon anneal steps')
     parser.add_argument('--learning_rate', type=float, default=0.001,
-
                        help='Learning rate for TD updates')
-    parser.add_argument('--reg', type=float, default=1,
+    parser.add_argument('--reg', type=float, default=0, #0.1 seems to work here
                        help='Regularization parameter for network')
 
     parser.add_argument('--layer_sizes', type=str, default='20',
