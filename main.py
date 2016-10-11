@@ -12,7 +12,6 @@ import tensorflow as tf
 
 class Agent():
     def __init__(self, session, args):
-
         self.n_input = args.input_size     # Number of features in each observation
         self.n_actions = args.num_actions  # Number of output q_values
         self.discount = args.discount      # Discount factor
@@ -20,6 +19,7 @@ class Agent():
         self.learning_rate = args.learning_rate
         self.regularization = args.reg
         self.use_target = args.use_target
+        self.double_q = args.double_q
 
 	self.layer_sizes = [self.n_input] + args.layer_sizes + [self.n_actions]
 
@@ -27,15 +27,16 @@ class Agent():
 
         self.memory = ReplayMemory(args)
 
-        # Tensorflow variables
+        # Tensorflow variables:
+
+        # Model for Q-values
         self.state = tf.placeholder("float", [None, self.n_input])
         with tf.variable_scope('prediction'):
             self.pred_q, self.reg, self.pred_weights = self.network(self.state, self.layer_sizes)
         with tf.variable_scope('target'):
             self.target_pred_q, _, self.target_weights = self.network(self.state, self.layer_sizes)
         
-        #self.pred_action = tf.argmax(self.pred_q, dimension=1)
-
+        # Graph for loss function
         self.action = tf.placeholder('int64', [None])
         action_one_hot = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
         q_acted = tf.reduce_sum(self.pred_q * action_one_hot, reduction_indices=1)
@@ -46,24 +47,49 @@ class Agent():
         loss = tf.reduce_mean(tf.square(delta)) + self.reg
         self.optim = tf.train.AdamOptimizer(self.learning_rate).minimize(loss)
 
+        # Global step (NB: Updated infrequently)
         self.step = tf.Variable(0, name='global_step', trainable=False)
 
+
     def predict(self, state):
+        # get q-vals with current network
         q = self.session.run(self.pred_q, feed_dict={self.state: [state]})
 
+        # get best action and q val via max-q
         action = np.argmax(q, axis=1)[0]; q = np.max(q, axis=1)[0]
+
+        # get action via epsilon-greedy
         if np.random.rand() < self.epsilon:
             action = np.random.randint(0, self.n_actions)
 
         return action, q
 
+
     def tdUpdate(self, s_t0, a_t0, r_t0, s_t1, t_t1):
-        q_t1 = self.target_pred_q.eval({self.state: s_t1}) if self.use_target else self.pred_q.eval({self.state: s_t1})
-        V_t1 = np.max(q_t1, axis=1)
+
+        # Get estimate of value, V, of s_(t+1)
+        if self.double_q:
+            #Predict action with current network
+            action = np.argmax(self.pred_q.eval({self.state: s_t1}), axis=1)
+            action_one_hot = np.eye(self.n_actions)[action] #neat little trick for getting one-hot
+
+            # Get value of action from target network
+            V_t1 = np.sum(np.multiply(self.target_pred_q.eval({self.state: s_t1}), action_one_hot), axis=1)
+        else:
+            # Get max value from current/target network
+            q_t1 = self.target_pred_q.eval({self.state: s_t1}) if self.use_target else self.pred_q.eval({self.state: s_t1})
+            V_t1 = np.max(q_t1, axis=1)
+        
+        # Set V to zero if episode has ended
         V_t1 = np.multiply(np.ones(shape=np.shape(t_t1)) - t_t1, V_t1)
+
+        # Bellman Equation
         target_q_t = self.discount * V_t1 + r_t0
+
+        # Update current network params
         self.session.run(self.optim, feed_dict={self.state: s_t0, self.target_q: target_q_t, self.action: a_t0})
         return True
+
 
     def network(self, state, d):
         hidden_dim = len(d)-1
@@ -78,14 +104,14 @@ class Agent():
         # Build graph
         fc = state
         for i in range(hidden_dim - 1):
-            fc = tf.tanh(tf.matmul(fc, weights[i]) + biases[i]) 
+            fc = tf.nn.relu(tf.matmul(fc, weights[i]) + biases[i]) 
     
         Qs = tf.matmul(fc, weights[-1]) + biases[-1]
-
         reg = self.regularization * tf.reduce_mean([tf.reduce_mean(tf.square(w)) for w in weights])# + [tf.reduce_mean(tf.square(b)) for b in biases])
 
         # Returns the output Q-values
         return Qs, reg, weights + biases
+
 
 # Adapted from github.com/devsisters/DQN-tensorflow/
 class ReplayMemory:
@@ -288,13 +314,15 @@ if __name__ == '__main__':
 
     parser.add_argument('--memory_size', type=int, default=1000,
                        help='Time to start training from')
-    parser.add_argument('--batch_size', type=int, default=10,
+    parser.add_argument('--batch_size', type=int, default=4,
                        help='Size of batch for Q-value updates')
 
     parser.add_argument('--use_target', type=bool, default=True,
                        help='Use separate target network')
     parser.add_argument('--target_step', type=int, default=1000,
                        help='Steps between updates of the taget network')
+    parser.add_argument('--double_q', type=int, default=1,
+                       help='Use Double Q learning')
 
     parser.add_argument('--discount', type=float, default=0.9,
                        help='Discount factor')
