@@ -9,7 +9,7 @@ import gym
 import numpy as np
 import tensorflow as tf
 
-from faiss import faiss
+import EC_functions
 
 
 class Agent():
@@ -40,19 +40,20 @@ class Agent():
         # DNDs
         self.DNDs = []
         for a in xrange(self.n_actions):
-            new_DND = DND()
+            new_DND = EC_functions.LRU_KNN(1000, self.state_embeddings.get_shape()[-1])
             self.DNDs.append(new_DND)
 
         # DND Calculations (everything from here on needs these placeholders filled)
         self.dnd_embeddings = tf.placeholder("float", [None, self.number_nn, self.state_embeddings.get_shape()[-1]], name="dnd_embeddings")
         self.dnd_values = tf.placeholder("float", [None, self.number_nn], name="dnd_values")
 
-        distances = tf.reduce_sum(tf.square(self.dnd_embeddings - tf.expand_dims(self.state_embeddings,1)), axis=2) + [self.delta] 
-        normalised_distances = distances / tf.reduce_sum(distances, axis=1, keep_dims=True) #keep dims for broadcasting
+        weightings = 1.0 / (tf.reduce_sum(tf.square(self.dnd_embeddings - tf.expand_dims(self.state_embeddings,1)), axis=2) + [self.delta]) 
+        normalised_weightings = weightings / tf.reduce_sum(weightings, axis=1, keep_dims=True) #keep dims for broadcasting
         if self.beta==0:
-            self.pred_q = tf.reduce_sum(self.dnd_values * normalised_distances, axis=1))
+            self.pred_q = tf.reduce_sum(self.dnd_values * normalised_weightings, axis=1)
+            #self.pred_q = tf.reduce_mean(self.dnd_values, axis=1)
         else:
-            self.pred_q = tf.log(tf.reduce_sum(tf.exp(self.beta * self.dnd_values) * normalised_distances, axis=1))
+            self.pred_q = tf.log(tf.reduce_sum(tf.exp(self.beta * self.dnd_values) * normalised_weightings, axis=1))
 
         # Loss Function
         self.target_q = tf.placeholder("float", [None])
@@ -74,26 +75,27 @@ class Agent():
         for i, a in enumerate(actions):
             e, v = self.DNDs[a].nn(embeddings[i], self.number_nn)
             dnd_embeddings.append(e) ; dnd_values.append(v)
+
         return dnd_embeddings, dnd_values
 
     def add_to_dnd(self, state, action, value):
         # Adds the given embedding to the corresponding dnd
         embedding = self.get_state_embedding([state])
         self.DNDs[action].add(embedding[0], value)
+
         return False
 
 
     def predict(self, state):
         # Return action and estimated state value for given state
 
-        
         # Get state embedding
         embedding = self.get_state_embedding([state])
 
         # calculate Q-values
         qs = []
         for a in xrange(self.n_actions):
-          if self.DNDs[a].size < self.number_nn:
+          if self.DNDs[a].curr_capacity < self.number_nn:
             q_ = [0.0]
           else:
             dnd_embeddings, dnd_values = self.get_nearest_neighbours(embedding, [a])
@@ -104,7 +106,7 @@ class Agent():
         # get action via epsilon-greedy
         if np.random.rand() < self.epsilon:
             action = np.random.randint(0, self.n_actions)
-            #V = qs[action]
+            V = qs[action]
 
         # Return action and estimated state value
         return action, V
@@ -113,7 +115,7 @@ class Agent():
     def Train(self, states, actions, Q_targets):
 
         for a in xrange(self.n_actions):
-          if self.DNDs[a].size < self.number_nn:
+          if self.DNDs[a].curr_capacity < self.number_nn:
             return True
 
         # Get nearest neighbours and their embeddings
@@ -144,49 +146,6 @@ class Agent():
 
         # Returns the output Q-values
         return Qs, weights + biases
-
-
-class DND():
-# DND memory for one action
-  def __init__(self):
-    d = args.layer_sizes[-1]
-
-    self.size = 0
-    self.embeddings = np.zeros((5000,d))
-    self.values = np.zeros(5000)
-
-    #self.quantizer = faiss.IndexFlatL2(d)
-    #self.index = faiss.IndexIVFFlat(self.quantizer, d, 10, faiss.METRIC_L2)
-    #self.index.train(np.random.rand(1000, d).astype('float32'))
-
-    self.index = faiss.IndexFlatL2(d)
-    self.index.add(np.array(self.embeddings).astype('float32'))
-    
-  
-  def add(self, embedding, value):
-    self.size += 1
-    #self.embeddings.append(embedding)
-    #self.values.append(value)
-    self.embeddings[self.size%5000] = embedding
-    self.values[self.size%5000] = value
-
-    #self.index.add(np.array([embedding]))
-
-    if self.size % 100 == -1:
-
-        #self.quantizer = faiss.IndexFlatL2(d)
-        #self.index = faiss.IndexIVFFlat(self.quantizer, d, 10, faiss.METRIC_L2)
-        #self.index.train(np.array(self.embeddings))
-        self.index.reset()# = faiss.IndexFlatL2(d)
-        self.index.add(np.array(self.embeddings))
-
-  def nn(self, embedding, count):
-    assert self.size >= count, "DND memory too small!"
-    _, indexes = self.index.search(np.array([embedding]), count)
-    indexes = indexes[0]
-
-    #return self.embeddings[-count:], self.values[-count:]
-    return self.embeddings[indexes], self.values[indexes]
 
 
 # Adapted from github.com/devsisters/DQN-tensorflow/
@@ -268,7 +227,7 @@ def main(_):
     states = [state] ; actions = []
     rewards = [] ; episode_t = 0
 
-    n_step = 100000
+    n_step = 100
 
     # Stats for display
     ep_rewards = [] ; ep_reward_last = 0
@@ -288,8 +247,6 @@ def main(_):
 
         # Bookeeping
         qs.append(value)
-
-        
 
         if terminal:
             # Bookeeping
@@ -324,10 +281,6 @@ def main(_):
             # Append to replay memory
             agent.memory.add(states[start_t], actions[start_t], R_t)
             agent.add_to_dnd(states[start_t], actions[start_t], R_t)
-
-            #tqdm.write("{}, {}, {}".format(start_t, value, R_t))
-
-
 
 
         # Train 
@@ -366,7 +319,9 @@ if __name__ == '__main__':
                        help='Number of iterations between parameter prints')
 
     parser.add_argument('--memory_size', type=int, default=1000,
-                       help='Time to start training from')
+                       help='Size of DND dictionary')
+    parser.add_argument('--replay_memory_size', type=int, default=1000,
+                       help='Size of replay memory')
     parser.add_argument('--batch_size', type=int, default=32,
                        help='Size of batch for Q-value updates')
 
