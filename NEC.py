@@ -28,26 +28,33 @@ class Agent():
 
 
         self.memory = ReplayMemory(args)
-        
+
+        self.old_way = False
 
         # Tensorflow variables:
 
         # Model for Embeddings
         self.state = tf.placeholder("float", [None, self.n_input])
+        self.action = tf.placeholder(tf.int64, [None])
         with tf.variable_scope('embedding'):
             self.state_embeddings, self.weights = self.network(self.state, self.layer_sizes)
 
         # DNDs
         self.DNDs = []
         for a in xrange(self.n_actions):
-            new_DND = EC_functions.LRU_KNN(1000, self.state_embeddings.get_shape()[-1])
+            new_DND = EC_functions.LRU_KNN(5000, self.state_embeddings.get_shape()[-1])
             self.DNDs.append(new_DND)
 
         # DND Calculations (everything from here on needs these placeholders filled)
-        self.dnd_embeddings = tf.placeholder("float", [None, self.number_nn, self.state_embeddings.get_shape()[-1]], name="dnd_embeddings")
-        self.dnd_values = tf.placeholder("float", [None, self.number_nn], name="dnd_values")
+        if self.old_way:
+            self.dnd_embeddings = tf.placeholder("float", [None, None, self.state_embeddings.get_shape()[-1]], name="dnd_embeddings")
+            self.dnd_values = tf.placeholder("float", [None, None], name="dnd_values")
+        else: # Call on DND directly
+            embs_and_values = tf.py_func(self.get_nearest_neighbours, [self.state_embeddings, self.action], [tf.float64, tf.float64])
+            self.dnd_embeddings = tf.to_float(embs_and_values[0])
+            self.dnd_values = tf.to_float(embs_and_values[1])
 
-        weightings = 1.0 / (tf.reduce_sum(tf.square(self.dnd_embeddings - tf.expand_dims(self.state_embeddings,1)), axis=2) + [self.delta]) 
+        weightings = 1.0 / (tf.reduce_sum(tf.square(self.dnd_embeddings - tf.expand_dims(self.state_embeddings, 1)), axis=2) + [self.delta]) 
         normalised_weightings = weightings / tf.reduce_sum(weightings, axis=1, keep_dims=True) #keep dims for broadcasting
         if self.beta==0:
             self.pred_q = tf.reduce_sum(self.dnd_values * normalised_weightings, axis=1)
@@ -73,15 +80,16 @@ class Agent():
         # Return the embeddings and values of nearest neighbours from the DNDs for the given embeddings and actions
         dnd_embeddings = [] ; dnd_values = []
         for i, a in enumerate(actions):
-            e, v = self.DNDs[a].nn(embeddings[i], self.number_nn)
+            e, v, _ = self.DNDs[a].nn(embeddings[i], self.number_nn)
             dnd_embeddings.append(e) ; dnd_values.append(v)
 
         return dnd_embeddings, dnd_values
 
+
     def add_to_dnd(self, state, action, value):
         # Adds the given embedding to the corresponding dnd
         embedding = self.get_state_embedding([state])
-        self.DNDs[action].add(embedding[0], value)
+        self.DNDs[action].add(embedding, [value])
 
         return False
 
@@ -98,8 +106,11 @@ class Agent():
           if self.DNDs[a].curr_capacity < self.number_nn:
             q_ = [0.0]
           else:
-            dnd_embeddings, dnd_values = self.get_nearest_neighbours(embedding, [a])
-            q_ = self.session.run(self.pred_q, feed_dict={self.state_embeddings: embedding, self.dnd_embeddings: dnd_embeddings, self.dnd_values: dnd_values})
+              if self.old_way:
+                dnd_embeddings, dnd_values = self.get_nearest_neighbours(embedding, [a])
+                q_ = self.session.run(self.pred_q, feed_dict={self.state_embeddings: embedding, self.dnd_embeddings: dnd_embeddings, self.dnd_values: dnd_values})
+              else:
+                q_ = self.session.run(self.pred_q, feed_dict={self.state: [state], self.action: [a]})
           qs.append(q_[0])
         action = np.argmax(qs) ; V = qs[action]
 
@@ -119,10 +130,12 @@ class Agent():
             return True
 
         # Get nearest neighbours and their embeddings
-        state_embeddings = self.get_state_embedding(states)
-        dnd_embeddings, dnd_values = self.get_nearest_neighbours(state_embeddings, actions)
-
-        self.session.run(self.optim, feed_dict={self.state: states, self.target_q: Q_targets, self.dnd_embeddings: dnd_embeddings, self.dnd_values: dnd_values})
+        if self.old_way:
+            state_embeddings = self.get_state_embedding(states)
+            dnd_embeddings, dnd_values = self.get_nearest_neighbours(state_embeddings, actions)
+            self.session.run(self.optim, feed_dict={self.state: states, self.target_q: Q_targets, self.dnd_embeddings: dnd_embeddings, self.dnd_values: dnd_values})
+        else:
+            self.session.run(self.optim, feed_dict={self.state: states, self.action: actions, self.target_q: Q_targets})
         return True
 
 
